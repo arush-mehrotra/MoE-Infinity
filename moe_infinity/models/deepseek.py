@@ -47,6 +47,31 @@ class DeepseekMoEBlock(nn.Module):
         self.archer_tracer = None
         self.archer_engine = None
         self.expert_tensor_ids: Dict[int, int] = None
+        
+        # For activation logging
+        self._activation_hooks = {}
+
+    def register_activation_hook(self, name, hook_fn):
+        """
+        Register a hook to capture activations during forward pass.
+        
+        Args:
+            name: Unique name for this hook
+            hook_fn: Function that will be called with captured data
+                     Should accept (expert_idx, inputs, outputs, token_indices, weights)
+        
+        Returns:
+            A handle that can be used to remove the hook
+        """
+        self._activation_hooks[name] = hook_fn
+        return name
+        
+    def remove_activation_hook(self, handle):
+        """Remove a previously registered activation hook"""
+        if handle in self._activation_hooks:
+            del self._activation_hooks[handle]
+            return True
+        return False
 
     def forward(self, hidden_states):
         identity = hidden_states
@@ -120,22 +145,54 @@ class DeepseekMoEBlock(nn.Module):
         results = self.expert_executor.dispatch_local(
             hidden_states, router_mask, self.layer_id
         )
-        for output, _, idx, _ in results:
+        
+        # Capture routing decisions for hooks
+        routing_info = {
+            "topk_idx": topk_idx,
+            "topk_weight": topk_weight,
+            "router_mask": router_mask,
+            "routing_weights_mask": routing_weights_mask
+        }
+        
+        for output, original_inputs, idx, _ in results:
             token_indices = router_mask[:, idx].bool()
             final_hidden_states[token_indices, :] += (
                 output.to(routing_weights_mask.device)
                 * routing_weights_mask[token_indices, idx][:, None]
             )
+            
+            # Call hooks for each expert
+            if self._activation_hooks:
+                for hook_fn in self._activation_hooks.values():
+                    hook_fn(
+                        expert_idx=idx,
+                        inputs=original_inputs,
+                        outputs=output,
+                        token_indices=token_indices,
+                        weights=routing_weights_mask[token_indices, idx],
+                        routing_info=routing_info
+                    )
 
         final_hidden_states = final_hidden_states.view(
             batch_size, sequence_length, hidden_dim
         )
         if self.config.n_shared_experts is not None:
-            final_hidden_states = final_hidden_states + self.shared_experts(
-                identity
-            )
+            shared_output = self.shared_experts(identity)
+            final_hidden_states = final_hidden_states + shared_output
+            
+            # Call hooks for shared expert
+            if self._activation_hooks:
+                for hook_fn in self._activation_hooks.values():
+                    hook_fn(
+                        expert_idx="shared",
+                        inputs=identity, 
+                        outputs=shared_output,
+                        token_indices=None,
+                        weights=None,
+                        routing_info=routing_info
+                    )
+                
         return final_hidden_states
-
         # outputs = []
         # start_idx = 0
         # for i, num_tokens in enumerate(tokens_per_expert):
@@ -160,3 +217,4 @@ class DeepseekMoEBlock(nn.Module):
         #     .type(new_x.dtype)
         # )
         # return y
+
