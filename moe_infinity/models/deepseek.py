@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from moe_infinity.utils.logging import MoELogger
+
 
 class DeepseekMoEBlock(nn.Module):
     """
@@ -47,6 +49,9 @@ class DeepseekMoEBlock(nn.Module):
         self.archer_tracer = None
         self.archer_engine = None
         self.expert_tensor_ids: Dict[int, int] = None
+
+        # Add logger
+        self.logger = MoELogger()
 
     def forward(self, hidden_states):
         identity = hidden_states
@@ -117,11 +122,23 @@ class DeepseekMoEBlock(nn.Module):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
+
+        # Log pre-expert metrics
+        self.logger.log_layer(
+            layer_id=self.layer_id,
+            router_logits=self.gate.weight @ hidden_states.t(),  # Get raw logits
+            routing_weights=topk_weight,
+            selected_experts=topk_idx,
+            hidden_states=hidden_states
+        )
+
         results = self.expert_executor.dispatch_local(
             hidden_states, router_mask, self.layer_id
         )
+        expert_outputs = {}
         for output, _, idx, _ in results:
             token_indices = router_mask[:, idx].bool()
+            expert_outputs[idx] = output
             final_hidden_states[token_indices, :] += (
                 output.to(routing_weights_mask.device)
                 * routing_weights_mask[token_indices, idx][:, None]
@@ -130,6 +147,17 @@ class DeepseekMoEBlock(nn.Module):
         final_hidden_states = final_hidden_states.view(
             batch_size, sequence_length, hidden_dim
         )
+        
+        # Log post-expert metrics
+        self.logger.log_layer(
+            layer_id=self.layer_id,
+            router_logits=self.gate.weight @ final_hidden_states.view(-1, hidden_dim).t(),
+            routing_weights=topk_weight,
+            selected_experts=topk_idx,
+            hidden_states=final_hidden_states,
+            expert_outputs=expert_outputs
+        )
+
         if self.config.n_shared_experts is not None:
             final_hidden_states = final_hidden_states + self.shared_experts(
                 identity
@@ -160,3 +188,15 @@ class DeepseekMoEBlock(nn.Module):
         #     .type(new_x.dtype)
         # )
         # return y
+
+    def get_activation_logs(self):
+        """Get all logged activations"""
+        return self.logger.layer_logs
+        
+    def get_layer_statistics(self):
+        """Get statistical summary of layer activations"""
+        return self.logger.get_layer_stats(self.layer_id)
+        
+    def clear_logs(self):
+        """Clear all logged data"""
+        self.logger.clear()
