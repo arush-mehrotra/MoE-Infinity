@@ -126,7 +126,7 @@ class DeepseekMoEBlock(nn.Module):
         # Log pre-expert metrics
         self.logger.log_layer(
             layer_id=self.layer_id,
-            router_logits=self.gate.weight @ hidden_states.t(),  # Get raw logits
+            router_logits=None,  # Skip computing router logits
             routing_weights=topk_weight,
             selected_experts=topk_idx,
             hidden_states=hidden_states
@@ -149,9 +149,10 @@ class DeepseekMoEBlock(nn.Module):
         )
         
         # Log post-expert metrics
+        final_hidden_states_reshaped = final_hidden_states.view(-1, hidden_dim)
         self.logger.log_layer(
             layer_id=self.layer_id,
-            router_logits=self.gate.weight @ final_hidden_states.view(-1, hidden_dim).t(),
+            router_logits=None,  # Skip computing router logits
             routing_weights=topk_weight,
             selected_experts=topk_idx,
             hidden_states=final_hidden_states,

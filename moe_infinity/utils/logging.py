@@ -17,7 +17,7 @@ class MoELogger:
         
         Args:
             layer_id: ID of the current layer
-            router_logits: Raw logits from router (batch_size * seq_len, n_experts)
+            router_logits: Raw logits from router (batch_size * seq_len, n_experts) or None
             routing_weights: Normalized weights for selected experts
             selected_experts: Expert indices selected for each token
             hidden_states: Hidden states for each token
@@ -34,7 +34,8 @@ class MoELogger:
                 }
             
             # Store metrics
-            self.layer_logs[layer_id]['router_logits'].append(router_logits.cpu().numpy())
+            if router_logits is not None:
+                self.layer_logs[layer_id]['router_logits'].append(router_logits.cpu().numpy())
             self.layer_logs[layer_id]['routing_weights'].append(routing_weights.cpu().numpy())
             self.layer_logs[layer_id]['selected_experts'].append(selected_experts.cpu().numpy())
             self.layer_logs[layer_id]['hidden_states'].append(hidden_states.cpu().numpy())
@@ -53,8 +54,6 @@ class MoELogger:
         
         # Compute statistics
         stats = {
-            'router_logits_mean': np.mean(logs['router_logits']),
-            'router_logits_std': np.std(logs['router_logits']),
             'routing_weights_mean': np.mean(logs['routing_weights']),
             'routing_weights_std': np.std(logs['routing_weights']),
             'expert_selection_counts': np.bincount(
@@ -63,6 +62,11 @@ class MoELogger:
             'hidden_states_mean': np.mean(logs['hidden_states']),
             'hidden_states_std': np.std(logs['hidden_states'])
         }
+        
+        # Add router_logits stats if available
+        if logs['router_logits']:
+            stats['router_logits_mean'] = np.mean(logs['router_logits'])
+            stats['router_logits_std'] = np.std(logs['router_logits'])
         
         return stats
 
