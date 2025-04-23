@@ -38,21 +38,46 @@ class MoEActivationLogger:
                     "weights": []
                 }
             
-            # Capture expert activations
-            self.activations[layer_name][expert_idx]["inputs"].append(inputs.detach().cpu())
-            self.activations[layer_name][expert_idx]["outputs"].append(outputs.detach().cpu())
+            # Safely capture expert activations
+            try:
+                if inputs is not None and torch.is_tensor(inputs):
+                    self.activations[layer_name][expert_idx]["inputs"].append(inputs.detach().cpu())
+                else:
+                    self.activations[layer_name][expert_idx]["inputs"].append(None)
+                    
+                if outputs is not None and torch.is_tensor(outputs):
+                    self.activations[layer_name][expert_idx]["outputs"].append(outputs.detach().cpu())
+                else:
+                    self.activations[layer_name][expert_idx]["outputs"].append(None)
+            except Exception as e:
+                print(f"Warning: Failed to capture activations for {layer_name}, expert {expert_idx}: {e}")
             
-            # Capture token routing information
-            if token_indices is not None:
-                self.activations[layer_name][expert_idx]["token_indices"].append(token_indices.detach().cpu())
-            if weights is not None:
-                self.activations[layer_name][expert_idx]["weights"].append(weights.detach().cpu())
+            # Safely capture token routing information
+            try:
+                if token_indices is not None and torch.is_tensor(token_indices):
+                    self.activations[layer_name][expert_idx]["token_indices"].append(token_indices.detach().cpu())
+                else:
+                    self.activations[layer_name][expert_idx]["token_indices"].append(None)
+                    
+                if weights is not None and torch.is_tensor(weights):
+                    self.activations[layer_name][expert_idx]["weights"].append(weights.detach().cpu())
+                else:
+                    self.activations[layer_name][expert_idx]["weights"].append(None)
+            except Exception as e:
+                print(f"Warning: Failed to capture routing info for {layer_name}, expert {expert_idx}: {e}")
                 
             # Store routing decisions once per layer
             if layer_name not in self.routing_decisions:
-                self.routing_decisions[layer_name] = {
-                    k: v.detach().cpu() for k, v in routing_info.items()
-                }
+                try:
+                    safe_routing_info = {}
+                    for k, v in routing_info.items():
+                        if v is not None and torch.is_tensor(v):
+                            safe_routing_info[k] = v.detach().cpu()
+                        else:
+                            safe_routing_info[k] = v
+                    self.routing_decisions[layer_name] = safe_routing_info
+                except Exception as e:
+                    print(f"Warning: Failed to capture routing decisions for {layer_name}: {e}")
                 
         return _hook
     
@@ -152,7 +177,11 @@ class MoEActivationLogger:
                 if expert_idx == "shared":
                     continue
                 
-                token_count = sum(indices.sum().item() for indices in data["token_indices"])
+                token_count = 0
+                for indices in data["token_indices"]:
+                    if indices is not None and torch.is_tensor(indices):
+                        token_count += indices.sum().item()
+                
                 expert_counts[expert_idx] = token_count
                 total_tokens += token_count
             
@@ -174,17 +203,26 @@ class MoEActivationLogger:
         
         for layer_name, routing in self.routing_decisions.items():
             if "topk_idx" in routing:
-                # Count occurrences of each expert
-                topk_idx = routing["topk_idx"].numpy()
-                unique, counts = np.unique(topk_idx, return_counts=True)
-                
-                # Create distribution array (normalized)
-                num_experts = max(unique) + 1
-                distribution = np.zeros(num_experts)
-                distribution[unique] = counts
-                distribution = distribution / distribution.sum()
-                
-                distributions[layer_name] = distribution
+                try:
+                    topk_idx = routing["topk_idx"]
+                    if topk_idx is not None and torch.is_tensor(topk_idx):
+                        # Convert to numpy safely
+                        topk_idx_np = topk_idx.numpy()
+                        
+                        # Count occurrences of each expert
+                        unique, counts = np.unique(topk_idx_np, return_counts=True)
+                        
+                        # Create distribution array (normalized)
+                        num_experts = max(unique) + 1 if len(unique) > 0 else 0
+                        if num_experts > 0:
+                            distribution = np.zeros(num_experts)
+                            distribution[unique] = counts
+                            if distribution.sum() > 0:
+                                distribution = distribution / distribution.sum()
+                            
+                            distributions[layer_name] = distribution
+                except Exception as e:
+                    print(f"Warning: Failed to calculate routing distribution for {layer_name}: {e}")
         
         return distributions
 
